@@ -19,6 +19,11 @@ export type OAuthEnv = MurekaEnv & {
   OAUTH_PROVIDER: OAuthHelpers;
 };
 
+// The Cloudflare provider library conventionally reads `OAUTH_KV`. Keep the
+// deployed binding named for this service and add this in-memory alias at the
+// Worker boundary, so only one KV namespace is provisioned.
+export type OAuthProviderEnv = OAuthEnv & { OAUTH_KV: KVNamespace };
+
 function escapeHtml(value: string): string {
   return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/\"/g, "&quot;").replace(/'/g, "&#039;");
 }

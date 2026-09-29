@@ -12,7 +12,7 @@ import {
   songModels,
   type MurekaEnv
 } from "./generation";
-import { GitHubOAuthHandler, type GitHubAuthProps, type OAuthEnv } from "./oauth";
+import { GitHubOAuthHandler, type GitHubAuthProps, type OAuthEnv, type OAuthProviderEnv } from "./oauth";
 
 const MCP_RESOURCE = "https://how-mureka-mcp.how-mureka-mcp.workers.dev/mcp";
 const READ_SCOPE = "mureka:read";
@@ -169,12 +169,13 @@ function createServer(env: MurekaEnv) {
 
 export default {
   fetch(request: Request, env: OAuthEnv, ctx: ExecutionContext) {
-    return oauthProvider.fetch(request, env, ctx);
+    const providerEnv: OAuthProviderEnv = { ...env, OAUTH_KV: env.MUREKA_OAUTH_KV };
+    return oauthProvider.fetch(request, providerEnv, ctx);
   }
 } satisfies ExportedHandler<OAuthEnv>;
 
 const mcpApiHandler = {
-  async fetch(request: Request, env: OAuthEnv, ctx: ExecutionContext) {
+  async fetch(request: Request, env: OAuthProviderEnv, ctx: ExecutionContext) {
     if (!isAuthenticatedMcpContext(ctx)) {
       return new Response("Access denied.", { status: 403, headers: { "Cache-Control": "no-store" } });
     }
@@ -192,7 +193,7 @@ const mcpApiHandler = {
   }
 };
 
-const oauthProvider = new OAuthProvider<OAuthEnv>({
+const oauthProvider = new OAuthProvider<OAuthProviderEnv>({
   apiRoute: "/mcp",
   apiHandler: mcpApiHandler,
   defaultHandler: GitHubOAuthHandler,
