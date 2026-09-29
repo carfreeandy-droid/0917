@@ -1,5 +1,6 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
+import { insufficientScope, OAuthProvider, type OAuthResourceContext } from "@cloudflare/workers-oauth-provider";
 import { z } from "zod";
 import {
   executeGeneration,
@@ -11,6 +12,61 @@ import {
   songModels,
   type MurekaEnv
 } from "./generation";
+import { GitHubOAuthHandler, type GitHubAuthProps, type OAuthEnv } from "./oauth";
+
+const MCP_RESOURCE = "https://how-mureka-mcp.how-mureka-mcp.workers.dev/mcp";
+const READ_SCOPE = "mureka:read";
+const PREPARE_SCOPE = "mureka:prepare";
+const EXECUTE_SCOPE = "mureka:execute";
+
+function requiredScopeForMcpRequest(request: Request): Promise<string> {
+  if (request.method !== "POST") return Promise.resolve(READ_SCOPE);
+  const contentLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(contentLength) && contentLength > 64 * 1024) return Promise.resolve(READ_SCOPE);
+  return request.clone().text().then((body) => {
+    if (body.length > 64 * 1024) return READ_SCOPE;
+    try {
+      const message: unknown = JSON.parse(body);
+      if (typeof message !== "object" || message === null || Array.isArray(message)) return READ_SCOPE;
+      const method = (message as Record<string, unknown>).method;
+      const params = (message as Record<string, unknown>).params;
+      if (method !== "tools/call" || typeof params !== "object" || params === null || Array.isArray(params)) return READ_SCOPE;
+      const name = (params as Record<string, unknown>).name;
+      if (name === "prepare_song_generation") return PREPARE_SCOPE;
+      if (name === "execute_song_generation") return EXECUTE_SCOPE;
+      return READ_SCOPE;
+    } catch {
+      return READ_SCOPE;
+    }
+  });
+}
+
+function scopeAllows(grantedScopes: string[], requiredScope: string): boolean {
+  if (requiredScope === READ_SCOPE) return grantedScopes.includes(READ_SCOPE) || grantedScopes.includes(PREPARE_SCOPE) || grantedScopes.includes(EXECUTE_SCOPE);
+  if (requiredScope === PREPARE_SCOPE) return grantedScopes.includes(PREPARE_SCOPE) || grantedScopes.includes(EXECUTE_SCOPE);
+  return grantedScopes.includes(EXECUTE_SCOPE);
+}
+
+async function timingSafeEqual(left: string, right: string): Promise<boolean> {
+  const encoder = new TextEncoder();
+  const leftBytes = encoder.encode(left);
+  const rightBytes = encoder.encode(right);
+  const normalizedRight = new Uint8Array(leftBytes.length);
+  normalizedRight.set(rightBytes.subarray(0, leftBytes.length));
+  const leftHash = new Uint8Array(await crypto.subtle.digest("SHA-256", leftBytes));
+  const rightHash = new Uint8Array(await crypto.subtle.digest("SHA-256", normalizedRight));
+  if (leftBytes.length !== rightBytes.length) return false;
+  let difference = 0;
+  for (let index = 0; index < leftHash.length; index += 1) difference |= leftHash[index] ^ rightHash[index];
+  return difference === 0;
+}
+
+function isAuthenticatedMcpContext(context: ExecutionContext): context is OAuthResourceContext<GitHubAuthProps> {
+  const props = context.props;
+  if (typeof props !== "object" || props === null || Array.isArray(props)) return false;
+  if (typeof (props as Record<string, unknown>).githubUserId !== "string") return false;
+  return "auth" in context;
+}
 
 function asText(data: unknown) {
   return {
@@ -26,7 +82,7 @@ function asText(data: unknown) {
 function createServer(env: MurekaEnv) {
   const server = new McpServer({
     name: "HOW Mureka MCP",
-    version: "0.2.0"
+    version: "0.3.0"
   });
 
   server.registerTool(
@@ -41,7 +97,7 @@ function createServer(env: MurekaEnv) {
         service: "Mureka API",
         api_base: MUREKA_API_BASE,
         api_key_configured: Boolean(env.MUREKA_API_KEY),
-        mode: "read-only plus confirmation preparation",
+        mode: "OAuth-protected read, preparation, and confirmation-gated execution",
         paid_execution_enabled: env.MUREKA_EXECUTION_AUTH_MODE === "oauth",
         paid_execution_block_reason:
           env.MUREKA_EXECUTION_AUTH_MODE === "oauth"
@@ -112,7 +168,48 @@ function createServer(env: MurekaEnv) {
 }
 
 export default {
-  fetch(request: Request, env: Env, ctx: ExecutionContext) {
-    return createMcpHandler(() => createServer(env))(request, env, ctx);
+  fetch(request: Request, env: OAuthEnv, ctx: ExecutionContext) {
+    return oauthProvider.fetch(request, env, ctx);
   }
-} satisfies ExportedHandler<Env>;
+} satisfies ExportedHandler<OAuthEnv>;
+
+const mcpApiHandler = {
+  async fetch(request: Request, env: OAuthEnv, ctx: ExecutionContext) {
+    if (!isAuthenticatedMcpContext(ctx)) {
+      return new Response("Access denied.", { status: 403, headers: { "Cache-Control": "no-store" } });
+    }
+    if (!(await timingSafeEqual(ctx.props.githubUserId, env.ALLOWED_GITHUB_USER_ID ?? ""))) {
+      return new Response("Access denied.", { status: 403, headers: { "Cache-Control": "no-store" } });
+    }
+    const requiredScope = await requiredScopeForMcpRequest(request);
+    if (!scopeAllows(ctx.auth.scope, requiredScope)) {
+      return insufficientScope(ctx.auth, [requiredScope], "This MCP operation requires an additional HOW Mureka scope.");
+    }
+    return createMcpHandler(() => createServer(env), {
+      route: "/mcp",
+      authContext: { props: ctx.props }
+    })(request, env, ctx);
+  }
+};
+
+const oauthProvider = new OAuthProvider<OAuthEnv>({
+  apiRoute: "/mcp",
+  apiHandler: mcpApiHandler,
+  defaultHandler: GitHubOAuthHandler,
+  authorizeEndpoint: "/authorize",
+  tokenEndpoint: "/token",
+  clientRegistrationEndpoint: "/register",
+  accessTokenTTL: 60 * 60,
+  refreshTokenTTL: 30 * 24 * 60 * 60,
+  refreshTokenIdleTTL: 30 * 24 * 60 * 60,
+  scopesSupported: [READ_SCOPE, PREPARE_SCOPE, EXECUTE_SCOPE],
+  resourceMetadata: {
+    resource: MCP_RESOURCE,
+    authorization_servers: ["https://how-mureka-mcp.how-mureka-mcp.workers.dev"],
+    scopes_supported: [READ_SCOPE, PREPARE_SCOPE, EXECUTE_SCOPE],
+    bearer_methods_supported: ["header"],
+    resource_name: "HOW Mureka MCP"
+  },
+  clientIdMetadataDocumentEnabled: true,
+  cookiePrefix: "__Host-how-mureka-oauth-"
+});

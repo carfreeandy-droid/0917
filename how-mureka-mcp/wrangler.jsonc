@@ -3,7 +3,16 @@
   "name": "how-mureka-mcp",
   "main": "src/server.ts",
   "compatibility_date": "2026-09-19",
-  "compatibility_flags": ["nodejs_compat"],
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "vars": {
+    "MUREKA_EXECUTION_AUTH_MODE": "oauth"
+  },
+  "kv_namespaces": [
+    {
+      "binding": "MUREKA_OAUTH_KV",
+      "id": "f186275afb754955aed919dacfa4a268"
+    }
+  ],
   "d1_databases": [
     {
       "binding": "MUREKA_STATE",
