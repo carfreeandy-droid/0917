@@ -3,5 +3,13 @@
   "name": "how-mureka-mcp",
   "main": "src/server.ts",
   "compatibility_date": "2026-09-19",
-  "compatibility_flags": ["nodejs_compat"]
+  "compatibility_flags": ["nodejs_compat"],
+  "d1_databases": [
+    {
+      "binding": "MUREKA_STATE",
+      "database_name": "how-mureka-mcp-state",
+      "database_id": "c752ed37-1b88-4b5a-91a5-71cb9727e3f4",
+      "migrations_dir": "./migrations"
+    }
+  ]
 }

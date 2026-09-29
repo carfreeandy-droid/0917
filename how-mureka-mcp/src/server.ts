@@ -1,11 +1,16 @@
 import { McpServer } from "@modelcontextprotocol/server";
 import { createMcpHandler } from "agents/mcp/server";
-
-interface Env {
-  MUREKA_API_KEY?: string;
-}
-
-const MUREKA_API_BASE = "https://api.mureka.ai";
+import { z } from "zod";
+import {
+  executeGeneration,
+  getBillingSnapshot,
+  getGenerationStatus,
+  MUREKA_API_BASE,
+  prepareGeneration,
+  prepareInput,
+  songModels,
+  type MurekaEnv
+} from "./generation";
 
 function asText(data: unknown) {
   return {
@@ -18,17 +23,17 @@ function asText(data: unknown) {
   };
 }
 
-function createServer(env: Env) {
+function createServer(env: MurekaEnv) {
   const server = new McpServer({
     name: "HOW Mureka MCP",
-    version: "0.1.0"
+    version: "0.2.0"
   });
 
   server.registerTool(
     "get_api_status",
     {
       description:
-        "Read-only health check for the HOW Mureka integration. Verifies whether the server has a Mureka API key configured. Does not generate music and does not consume generation credits.",
+        "Read-only health check for the HOW Mureka integration. Does not generate music and does not consume Mureka API credits.",
       inputSchema: {}
     },
     async () => {
@@ -36,8 +41,12 @@ function createServer(env: Env) {
         service: "Mureka API",
         api_base: MUREKA_API_BASE,
         api_key_configured: Boolean(env.MUREKA_API_KEY),
-        mode: "read-only",
-        generation_enabled: false
+        mode: "read-only plus confirmation preparation",
+        paid_execution_enabled: env.MUREKA_EXECUTION_AUTH_MODE === "oauth",
+        paid_execution_block_reason:
+          env.MUREKA_EXECUTION_AUTH_MODE === "oauth"
+            ? null
+            : "OAuth-protected MCP caller authentication is not configured."
       });
     }
   );
@@ -46,45 +55,57 @@ function createServer(env: Env) {
     "get_billing",
     {
       description:
-        "Read the authenticated Mureka API account billing/credit information. This is read-only and does not generate music or consume song-generation credits.",
+        "Read the Mureka API billing endpoint without generating music. Amounts, when present, are reported in cents exactly as returned by Mureka.",
       inputSchema: {}
     },
-    async () => {
-      if (!env.MUREKA_API_KEY) {
-        throw new Error(
-          "MUREKA_API_KEY is not configured on the server. Add it as a Cloudflare secret before using get_billing."
-        );
+    async () => asText(await getBillingSnapshot(env))
+  );
+
+  server.registerTool(
+    "prepare_song_generation",
+    {
+      description:
+        "Prepare a one-time, expiring Mureka song or instrumental confirmation. This tool never calls a paid Mureka generation endpoint.",
+      inputSchema: {
+        title: z.string().min(1).max(200).optional(),
+        generation_type: z.enum(["song", "instrumental"]).optional(),
+        lyrics: z.string().min(1).max(5000).optional(),
+        prompt: z.string().min(1).max(1024).optional(),
+        model: z.enum(songModels).optional(),
+        gender: z.enum(["female", "male"]).optional(),
+        reference_id: z.string().min(1).max(200).optional(),
+        vocal_id: z.string().min(1).max(200).optional(),
+        melody_id: z.string().min(1).max(200).optional(),
+        instrumental_id: z.string().min(1).max(200).optional(),
+        n: z.number().int().min(1).max(3).optional(),
+        stream: z.boolean().optional()
       }
+    },
+    async (input) => asText(await prepareGeneration(env, prepareInput.parse(input)))
+  );
 
-      const response = await fetch(`${MUREKA_API_BASE}/v1/account/billing`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${env.MUREKA_API_KEY}`,
-          Accept: "application/json"
-        }
-      });
-
-      const raw = await response.text();
-      let body: unknown = raw;
-      try {
-        body = JSON.parse(raw);
-      } catch {
-        // Keep raw text when the upstream response is not JSON.
+  server.registerTool(
+    "execute_song_generation",
+    {
+      description:
+        "Paid mutation. Requires a valid one-time pending ID and explicit human confirmation. It remains fail-closed until OAuth-protected MCP caller authentication is configured.",
+      inputSchema: {
+        pending_generation_id: z.string().uuid(),
+        human_confirmation: z.literal("I_CONFIRM_MUREKA_API_CHARGE")
       }
+    },
+    async ({ pending_generation_id, human_confirmation }) =>
+      asText(await executeGeneration(env, pending_generation_id, human_confirmation))
+  );
 
-      if (!response.ok) {
-        throw new Error(
-          `Mureka billing request failed with HTTP ${response.status}: ${typeof body === "string" ? body : JSON.stringify(body)}`
-        );
-      }
-
-      return asText({
-        service: "Mureka API",
-        endpoint: "/v1/account/billing",
-        read_only: true,
-        billing: body
-      });
-    }
+  server.registerTool(
+    "get_generation_status",
+    {
+      description:
+        "Read a locally prepared generation or a Mureka task previously submitted by this MCP. It never creates music.",
+      inputSchema: { generation_id_or_task_id: z.string().min(1).max(200) }
+    },
+    async ({ generation_id_or_task_id }) => asText(await getGenerationStatus(env, generation_id_or_task_id))
   );
 
   return server;
