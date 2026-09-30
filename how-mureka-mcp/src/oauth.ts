@@ -51,8 +51,14 @@ function redirect(headers: Headers, location: string): Response {
   return new Response(null, { status: 302, headers: securityHeaders(headers) });
 }
 
-function hasConfiguration(env: OAuthEnv): boolean {
-  return Boolean(env.GITHUB_CLIENT_ID && env.GITHUB_CLIENT_SECRET && env.COOKIE_ENCRYPTION_KEY && env.ALLOWED_GITHUB_USER_ID);
+function configurationProblem(env: OAuthEnv): string | null {
+  if (!env.GITHUB_CLIENT_ID || !env.GITHUB_CLIENT_SECRET || !env.COOKIE_ENCRYPTION_KEY || !env.ALLOWED_GITHUB_USER_ID) {
+    return "OAuth is not configured yet.";
+  }
+  if (env.COOKIE_ENCRYPTION_KEY.length < 32) {
+    return "OAuth cookie configuration is invalid.";
+  }
+  return null;
 }
 
 function authorizationErrorResponse(error: unknown): Response {
@@ -122,19 +128,35 @@ async function beginGithubAuthorization(env: OAuthEnv, request: AuthRequest, hea
 async function showConsent(request: Request, env: OAuthEnv): Promise<Response> {
   let authorization: AuthRequest;
   try { authorization = await env.OAUTH_PROVIDER.parseAuthRequest(request); } catch (error) { return authorizationErrorResponse(error); }
-  if (!hasConfiguration(env)) return errorPage(503, "OAuth is not configured yet.");
-  if (await env.OAUTH_PROVIDER.isConsentRemembered(request, authorization, { secret: env.COOKIE_ENCRYPTION_KEY ?? "" })) {
-    return beginGithubAuthorization(env, authorization, new Headers());
+  const problem = configurationProblem(env);
+  if (problem) return errorPage(503, problem);
+  try {
+    if (await env.OAUTH_PROVIDER.isConsentRemembered(request, authorization, { secret: env.COOKIE_ENCRYPTION_KEY ?? "" })) {
+      return beginGithubAuthorization(env, authorization, new Headers());
+    }
+  } catch {
+    return errorPage(503, "OAuth remembered-consent configuration is unavailable.");
   }
-  const consent = await env.OAUTH_PROVIDER.beginConsent(authorization);
-  const client = await env.OAUTH_PROVIDER.lookupClient(authorization.clientId);
+  let consent;
+  try {
+    consent = await env.OAUTH_PROVIDER.beginConsent(authorization);
+  } catch {
+    return errorPage(503, "OAuth consent storage is unavailable.");
+  }
+  let client;
+  try {
+    client = await env.OAUTH_PROVIDER.lookupClient(authorization.clientId);
+  } catch {
+    return errorPage(503, "OAuth client registration could not be loaded.");
+  }
   const clientName = escapeHtml(client?.clientName ?? "MCP client");
   const scopes = scopesToGrant(authorization).map((scope) => `<li>${escapeHtml(scope)}</li>`).join("");
   return html(`<!doctype html><html lang="en"><meta charset="utf-8"><title>Authorize HOW Mureka MCP</title><body><h1>Authorize HOW Mureka MCP</h1><p><strong>${clientName}</strong> requests access to this private Mureka MCP server.</p><ul>${scopes}</ul><form method="post" action="/authorize"><input type="hidden" name="handle" value="${escapeHtml(consent.handle)}"><button name="decision" value="allow" type="submit">Allow</button><button name="decision" value="deny" type="submit">Deny</button></form></body></html>`, consent.headers);
 }
 
 async function submitConsent(request: Request, env: OAuthEnv): Promise<Response> {
-  if (!hasConfiguration(env)) return errorPage(503, "OAuth is not configured yet.");
+  const problem = configurationProblem(env);
+  if (problem) return errorPage(503, problem);
   const form = await request.formData();
   const handle = form.get("handle");
   const decision = form.get("decision");
@@ -152,7 +174,8 @@ async function submitConsent(request: Request, env: OAuthEnv): Promise<Response>
 }
 
 async function githubCallback(request: Request, env: OAuthEnv): Promise<Response> {
-  if (!hasConfiguration(env)) return errorPage(503, "OAuth is not configured yet.");
+  const problem = configurationProblem(env);
+  if (problem) return errorPage(503, problem);
   const code = new URL(request.url).searchParams.get("code");
   if (!code) return errorPage(400, "GitHub did not provide an authorization code.");
   try {
