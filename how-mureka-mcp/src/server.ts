@@ -144,7 +144,7 @@ function createServer(env: MurekaEnv) {
     "execute_song_generation",
     {
       description:
-        "Paid mutation. Requires a valid one-time pending ID and explicit human confirmation. It remains fail-closed until OAuth-protected MCP caller authentication is configured.",
+        "Paid mutation. Requires an OAuth-authorized caller, a valid one-time pending ID, and explicit human confirmation before any Mureka generation request can be sent.",
       inputSchema: {
         pending_generation_id: z.string().uuid(),
         human_confirmation: z.literal("I_CONFIRM_MUREKA_API_CHARGE")

@@ -160,7 +160,17 @@ export async function prepareGeneration(env: MurekaEnv, input: PrepareInput) {
     .bind(id, now, now, now, now + PREPARE_TTL_SECONDS, input.title ?? null, input.generation_type, input.model, input.lyrics ?? null, input.prompt ?? null, JSON.stringify(parameters), input.n, billing.balance_cents).run();
   const row = await loadGeneration(env, id);
   if (!row) throw new Error("Could not load the prepared generation.");
-  return { ...publicGeneration(row, billing), will_call_paid_api_on_execute: true, estimated_cost: "unavailable", cost_notice: "Mureka's billing endpoint does not provide a per-request quote. No cost estimate has been invented.", execute_available: false, execute_block_reason: "MCP caller OAuth is not configured; paid execution remains fail-closed." };
+  return {
+    ...publicGeneration(row, billing),
+    will_call_paid_api_on_execute: true,
+    estimated_cost: "unavailable",
+    cost_notice: "Mureka's billing endpoint does not provide a per-request quote. No cost estimate has been invented.",
+    execute_available: env.MUREKA_EXECUTION_AUTH_MODE === "oauth",
+    execute_block_reason:
+      env.MUREKA_EXECUTION_AUTH_MODE === "oauth"
+        ? null
+        : "OAuth-protected MCP caller authentication is not configured; paid execution remains fail-closed."
+  };
 }
 
 export async function executeGeneration(env: MurekaEnv, id: string, humanConfirmation: string) {
